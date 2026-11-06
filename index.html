@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Expense Report 2026</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--text:#111827;--muted:#6b7280;--line:#e5e7eb;--accent:#2563eb;--bad:#dc2626;--good:#16a34a}
+@media(prefers-color-scheme:dark){:root{--bg:#0f172a;--card:#1e293b;--text:#f1f5f9;--muted:#94a3b8;--line:#334155;--accent:#60a5fa;--bad:#f87171;--good:#4ade80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1200px;margin:0 auto;padding:20px}
+h1{margin:0 0 4px;font-size:22px}
+.sub{color:var(--muted);margin-bottom:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px}
+.grid{display:grid;gap:12px;margin-bottom:12px}
+.kpis{grid-template-columns:repeat(auto-fit,minmax(200px,1fr))}
+.two{grid-template-columns:repeat(auto-fit,minmax(340px,1fr))}
+.kpi .l{color:var(--muted);font-size:12px}
+.kpi .v{font-size:20px;font-weight:600;margin-top:2px}
+.filters{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+select,input[type=text]{padding:7px 9px;border:1px solid var(--line);border-radius:6px;background:var(--card);color:var(--text);font:inherit}
+label.chk{display:flex;gap:6px;align-items:center;color:var(--muted)}
+.scroll{overflow-x:auto;max-height:480px;overflow-y:auto}
+table{border-collapse:collapse;width:100%}
+th,td{padding:7px 9px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+th{position:sticky;top:0;background:var(--card);font-size:12px;color:var(--muted)}
+td.n,th.n{text-align:right;white-space:nowrap}
+.bar{height:6px;background:var(--accent);border-radius:3px;min-width:2px}
+.neg{color:var(--bad)}.pos{color:var(--good)}
+#msg{padding:12px;border-radius:8px;margin-bottom:12px;display:none;background:var(--card);border:1px solid var(--bad);color:var(--bad)}
+.chart{position:relative;height:300px}
+h2{font-size:15px;margin:0 0 10px}
+.note{color:var(--muted);font-size:12px;margin-top:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Expense Report 2026</h1>
+  <div class="sub" id="sub">Memuat data…</div>
+  <div id="msg"></div>
+
+  <div class="filters card">
+    <select id="fMonth"></select>
+    <select id="fSystem"></select>
+    <select id="fAnalytic"></select>
+    <select id="fCat"></select>
+    <input type="text" id="fSearch" placeholder="Cari deskripsi…">
+    <label class="chk"><input type="checkbox" id="fDedupe"> Hilangkan baris identik (mis. SR ganda)</label>
+    <button id="btnReload">Muat ulang</button>
+  </div>
+
+  <div class="grid kpis">
+    <div class="card kpi"><div class="l">Total expenses</div><div class="v" id="kExp">-</div></div>
+    <div class="card kpi"><div class="l">Total revenue</div><div class="v" id="kRev">-</div></div>
+    <div class="card kpi"><div class="l">Net (revenue − expenses)</div><div class="v" id="kNet">-</div></div>
+    <div class="card kpi"><div class="l">Jumlah baris</div><div class="v" id="kCnt">-</div></div>
+  </div>
+
+  <div class="grid two">
+    <div class="card"><h2>Expenses per kategori</h2><div class="chart"><canvas id="cCat"></canvas></div></div>
+    <div class="card"><h2>Expenses vs Revenue per bulan</h2><div class="chart"><canvas id="cMonth"></canvas></div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:12px">
+    <h2>Ringkasan per kategori</h2>
+    <div class="scroll"><table id="tCat"></table></div>
+  </div>
+
+  <div class="card">
+    <h2>Detail transaksi <span class="note" id="detNote"></span></h2>
+    <div class="scroll"><table id="tDet"></table></div>
+  </div>
+</div>
+
+<script>
+/* ====== PENGATURAN ====== */
+const CONFIG = {
+  // Sheet harus dibagikan "Anyone with the link: Viewer" agar bisa dibaca dari browser.
+  SHEET_URL: 'https://docs.google.com/spreadsheets/d/1p0dCDjiEVBVzQ6uxfiNpamKTL0JJh3T44Hg29ZoE3ww/edit?gid=2119204512',
+  MAX_DETAIL_ROWS: 300
+};
+const ALIAS = {
+  system: ['system'], tanggal: ['date', 'tanggal', 'tgl'],
+  deskripsi: ['decription', 'description', 'deskripsi', 'keterangan'],
+  kategori: ['category', 'kategori'], analytic: ['analytic', 'analytic account'],
+  expenses: ['expenses', 'expense', 'biaya'], revenue: ['revenue', 'pendapatan']
+};
+
+/* ====== UTIL ====== */
+const $ = id => document.getElementById(id);
+const rp = n => new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(n);
+const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+let ALL = [], charts = {};
+
+function parseCSV(t) {
+  const rows = []; let row = [], cur = '', q = false;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (q) {
+      if (c === '"') { if (t[i + 1] === '"') { cur += '"'; i++; } else q = false; }
+      else cur += c;
+    } else if (c === '"') q = true;
+    else if (c === ',') { row.push(cur); cur = ''; }
+    else if (c === '\n' || c === '\r') {
+      if (c === '\r' && t[i + 1] === '\n') i++;
+      row.push(cur); rows.push(row); row = []; cur = '';
+    } else cur += c;
+  }
+  if (cur !== '' || row.length) { row.push(cur); rows.push(row); }
+  return rows;
+}
+function parseAmount(v) {
+  let s = String(v || '').replace(/[^0-9.,\-]/g, '');
+  if (!s) return 0;
+  const d = s.lastIndexOf('.'), c = s.lastIndexOf(',');
+  s = c > d ? s.replace(/\./g, '').replace(',', '.') : s.replace(/,/g, '');
+  const n = Number(s); return isNaN(n) ? 0 : n;
+}
+function parseDate(v) {
+  const m = String(v || '').trim().match(/^(\d{1,2})[-\s]([A-Za-z]{3})[a-z]*[-\s](\d{4})$/);
+  if (m) { const mo = MONTHS.map(x => x.toLowerCase()).indexOf(m[2].toLowerCase()); if (mo >= 0) return new Date(+m[3], mo, +m[1]); }
+  const d = new Date(v); return isNaN(d) ? null : d;
+}
+function toRows(grid) {
+  let h = null;
+  for (let r = 0; r < Math.min(grid.length, 10) && !h; r++) {
+    const idx = {};
+    grid[r].forEach((cell, c) => {
+      const n = cell.trim().toLowerCase();
+      for (const k in ALIAS) if (idx[k] === undefined && ALIAS[k].includes(n)) idx[k] = c;
+    });
+    if (idx.tanggal !== undefined && idx.kategori !== undefined && (idx.expenses !== undefined || idx.revenue !== undefined)) h = { r, idx };
+  }
+  if (!h) throw new Error('Header tidak ketemu (butuh kolom Date, Category, dan Expenses/Revenue).');
+  const g = (row, k) => h.idx[k] === undefined ? '' : row[h.idx[k]] || '';
+  const out = [];
+  for (let r = h.r + 1; r < grid.length; r++) {
+    const row = grid[r], date = parseDate(g(row, 'tanggal'));
+    const exp = parseAmount(g(row, 'expenses')), rev = parseAmount(g(row, 'revenue'));
+    if (!date || (!exp && !rev)) continue;
+    out.push({
+      date, month: date.getFullYear() * 100 + date.getMonth() + 1,
+      system: g(row, 'system').trim() || '-', category: g(row, 'kategori').trim() || 'Tanpa kategori',
+      analytic: g(row, 'analytic').trim() || '-', desc: g(row, 'deskripsi').replace(/\s+/g, ' ').trim(),
+      exp, rev
+    });
+  }
+  return out;
+}
+
+/* ====== LOAD ====== */
+async function load() {
+  $('msg').style.display = 'none'; $('sub').textContent = 'Memuat data…';
+  try {
+    const id = (CONFIG.SHEET_URL.match(/\/d\/([^/]+)/) || [])[1];
+    const gid = (CONFIG.SHEET_URL.match(/[#&?]gid=(\d+)/) || [])[1];
+    if (!id) throw new Error('SHEET_URL tidak valid.');
+    const url = 'https://docs.google.com/spreadsheets/d/' + id + '/gviz/tq?tqx=out:csv' + (gid ? '&gid=' + gid : '');
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    ALL = toRows(parseCSV(await res.text()));
+    if (!ALL.length) throw new Error('Tidak ada baris data yang valid.');
+    fillFilters();
+    $('sub').textContent = 'Sumber: Google Sheets · diperbarui ' + new Date().toLocaleString('id-ID');
+    render();
+  } catch (e) {
+    $('sub').textContent = '';
+    const m = $('msg'); m.style.display = 'block';
+    m.textContent = 'Gagal memuat data: ' + e.message + '. Pastikan sheet dibagikan sebagai "Anyone with the link – Viewer".';
+  }
+}
+function opts(sel, label, vals) {
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">' + label + '</option>' + vals.map(v => '<option value="' + esc(v[0]) + '">' + esc(v[1]) + '</option>').join('');
+  sel.value = keep;
+}
+function fillFilters() {
+  const uniq = k => [...new Set(ALL.map(x => x[k]))].sort();
+  opts($('fMonth'), 'Semua bulan', uniq('month').map(m => [m, MONTHS[(m % 100) - 1] + ' ' + Math.floor(m / 100)]));
+  opts($('fSystem'), 'Semua system', uniq('system').map(v => [v, v]));
+  opts($('fAnalytic'), 'Semua analytic', uniq('analytic').map(v => [v, v]));
+  opts($('fCat'), 'Semua kategori', uniq('category').map(v => [v, v]));
+}
+
+/* ====== RENDER ====== */
+function group(rows, key, f) {
+  const o = {}; rows.forEach(x => { o[x[key]] = (o[x[key]] || 0) + x[f]; });
+  return Object.entries(o).sort((a, b) => b[1] - a[1]);
+}
+function render() {
+  const f = { m: $('fMonth').value, s: $('fSystem').value, a: $('fAnalytic').value, c: $('fCat').value, q: $('fSearch').value.toLowerCase() };
+  let rows = ALL.filter(x => (!f.m || x.month == f.m) && (!f.s || x.system === f.s) && (!f.a || x.analytic === f.a) &&
+    (!f.c || x.category === f.c) && (!f.q || x.desc.toLowerCase().includes(f.q)));
+  if ($('fDedupe').checked) {
+    const seen = new Set();
+    rows = rows.filter(x => { const k = [x.system, +x.date, x.desc, x.category, x.exp, x.rev].join('|'); if (seen.has(k)) return false; seen.add(k); return true; });
+  }
+  const tE = rows.reduce((s, x) => s + x.exp, 0), tR = rows.reduce((s, x) => s + x.rev, 0), net = tR - tE;
+  $('kExp').textContent = rp(tE); $('kRev').textContent = rp(tR); $('kCnt').textContent = rows.length.toLocaleString('id-ID');
+  $('kNet').textContent = rp(net); $('kNet').className = 'v ' + (net < 0 ? 'neg' : 'pos');
+
+  const cats = group(rows, 'category', 'exp').filter(x => x[1] > 0);
+  const top = cats.slice(0, 8), rest = cats.slice(8).reduce((s, x) => s + x[1], 0);
+  if (rest) top.push(['Lainnya', rest]);
+  const mm = {}; rows.forEach(x => { mm[x.month] = mm[x.month] || [0, 0]; mm[x.month][0] += x.exp; mm[x.month][1] += x.rev; });
+  const mKeys = Object.keys(mm).sort();
+
+  Chart.defaults.color = getComputedStyle(document.body).getPropertyValue('--muted');
+  Object.values(charts).forEach(c => c.destroy());
+  const pal = ['#2563eb', '#f59e0b', '#10b981', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16', '#94a3b8'];
+  charts.cat = new Chart($('cCat'), {
+    type: 'doughnut',
+    data: { labels: top.map(x => x[0]), datasets: [{ data: top.map(x => x[1]), backgroundColor: pal, borderWidth: 0 }] },
+    options: { maintainAspectRatio: false, plugins: { legend: { position: 'right' }, tooltip: { callbacks: { label: c => ' ' + c.label + ': ' + rp(c.parsed) } } } }
+  });
+  charts.month = new Chart($('cMonth'), {
+    type: 'bar',
+    data: {
+      labels: mKeys.map(m => MONTHS[(m % 100) - 1] + ' ' + Math.floor(m / 100)),
+      datasets: [{ label: 'Expenses', data: mKeys.map(k => mm[k][0]), backgroundColor: '#ef4444' },
+                 { label: 'Revenue', data: mKeys.map(k => mm[k][1]), backgroundColor: '#10b981' }]
+    },
+    options: { maintainAspectRatio: false, scales: { y: { ticks: { callback: v => rp(v) } } }, plugins: { tooltip: { callbacks: { label: c => ' ' + c.dataset.label + ': ' + rp(c.parsed.y) } } } }
+  });
+
+  const max = cats.length ? cats[0][1] : 1;
+  $('tCat').innerHTML = '<tr><th>Kategori</th><th class="n">Total</th><th class="n">%</th><th style="width:25%"></th></tr>' +
+    cats.map(([k, v]) => '<tr><td>' + esc(k) + '</td><td class="n">' + rp(v) + '</td><td class="n">' + (tE ? (v / tE * 100).toFixed(1) : 0) + '%</td><td><div class="bar" style="width:' + (v / max * 100) + '%"></div></td></tr>').join('');
+
+  const det = rows.slice().sort((a, b) => b.date - a.date);
+  $('detNote').textContent = det.length > CONFIG.MAX_DETAIL_ROWS ? '(menampilkan ' + CONFIG.MAX_DETAIL_ROWS + ' terbaru dari ' + det.length + ')' : '';
+  $('tDet').innerHTML = '<tr><th>Tanggal</th><th>System</th><th>Kategori</th><th>Analytic</th><th>Deskripsi</th><th class="n">Expenses</th><th class="n">Revenue</th></tr>' +
+    det.slice(0, CONFIG.MAX_DETAIL_ROWS).map(x => '<tr><td>' + x.date.toLocaleDateString('id-ID', { day: '2-digit', month: 'short', year: 'numeric' }) + '</td><td>' + esc(x.system) + '</td><td>' + esc(x.category) + '</td><td>' + esc(x.analytic) + '</td><td>' + esc(x.desc) + '</td><td class="n">' + (x.exp ? rp(x.exp) : '') + '</td><td class="n">' + (x.rev ? rp(x.rev) : '') + '</td></tr>').join('');
+}
+
+['fMonth', 'fSystem', 'fAnalytic', 'fCat', 'fDedupe'].forEach(id => $(id).addEventListener('change', render));
+$('fSearch').addEventListener('input', render);
+$('btnReload').addEventListener('click', load);
+load();
+</script>
+</body>
+</html>
